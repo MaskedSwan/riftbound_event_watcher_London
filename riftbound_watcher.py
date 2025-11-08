@@ -3,17 +3,17 @@
 Riftbound London Event Watcher
 ---------------------------------
 Scrapes London store pages for **Riftbound** events and posts new ones to a Discord channel
-(via webhook). Also supports exporting an .ics calendar and a CSV to help plan your week/month.
+(via webhook). Also supports exporting an .ics calendar and a CSV to help plan.
 
 Stores covered:
-- Dark Sphere (Shepherd's Bush): month calendar (custom parser)
-- Spellbound Games (London): Shopify products (reused parser)
-- The Brotherhood Games (Bermondsey): Shopify products (reused parser)
-- Leisure Games (Finchley): Shopify products (reused parser + loose date)
-- Europa Gaming (Wembley): standalone event pages (generic event parser)
-- Zombie Games Café (Cricklewood): Wix “product-page” tickets (parser)
+- Dark Sphere (Shepherd's Bush): calendar
+- Spellbound Games (London): Shopify products
+- The Brotherhood Games (Bermondsey): Shopify products
+- Leisure Games (Finchley): Shopify products
+- Zombie Games Café (Cricklewood): Wix product pages
+- Europa Gaming (Wembley): standalone event pages
 
-Highlights in Discord:
+Discord highlights:
 - ⚡ Summoner Skirmish
 - 🏅 Regional Qualifier
 - 🥇 Regional Championship
@@ -32,7 +32,7 @@ from dateutil import parser as dtparse
 from ics import Calendar, Event as IcsEvent
 
 LONDON_TZ = pytz.timezone("Europe/London")
-HEADERS = {"User-Agent": "RiftboundWatcher/1.3 (+https://example.local)"}
+HEADERS = {"User-Agent": "RiftboundWatcher/1.4 (+https://example.local)"}
 DATA_DIR = os.path.join(os.path.dirname(__file__), ".data")
 STATE_PATH = os.path.join(DATA_DIR, "state.json")
 
@@ -63,12 +63,10 @@ class RBEvent:
     location: Optional[str] = None
 
     def uid(self) -> str:
-        # Title-sensitive id (kept for backward compatibility)
         base = f"{self.store}|{self.title}|{self.start.replace(second=0, microsecond=0).isoformat()}"
         return hashlib.sha1(base.encode("utf-8")).hexdigest()
 
     def stable_id(self) -> str:
-        # Title-agnostic id (store + start minute)
         base = f"{self.store}|{self.start.replace(second=0, microsecond=0).isoformat()}"
         return hashlib.sha1(base.encode("utf-8")).hexdigest()
 
@@ -83,20 +81,18 @@ def ensure_dirs(): os.makedirs(DATA_DIR, exist_ok=True)
 def load_state() -> set:
     ensure_dirs()
     if not os.path.exists(STATE_PATH): return set()
-    with open(STATE_PATH, "r", encoding="utf-8") as f:
-        raw = json.load(f)
+    with open(STATE_PATH, "r", encoding="utf-8") as f: raw = json.load(f)
     return set(raw if isinstance(raw, list) else [])
 def save_state(seen: set):
     ensure_dirs()
-    with open(STATE_PATH, "w", encoding="utf-8") as f:
-        json.dump(sorted(list(seen)), f, indent=2)
+    with open(STATE_PATH, "w", encoding="utf-8") as f: json.dump(sorted(list(seen)), f, indent=2)
 def londonify(dt: datetime) -> datetime:
     if dt.tzinfo is None: return LONDON_TZ.localize(dt)
     return dt.astimezone(LONDON_TZ)
 def guess_end(start: datetime, hours: int = 3) -> datetime: return start + timedelta(hours=hours)
 
 def resolve_calendar_date(month_name: str, year: int, day: int) -> Optional[date]:
-    """Dark Sphere sometimes shows a day that belongs to the next month (e.g., '31' under November)."""
+    """Dark Sphere sometimes shows a day that belongs to next month (e.g., '31' under November)."""
     try: month = dtparse.parse(month_name).month
     except Exception: month = 1
     last = calendar.monthrange(year, month)[1]
@@ -126,8 +122,7 @@ def post_discord(event: RBEvent) -> None:
 
 # ---------------------------- Scrapers ------------------------------------
 def fetch(url: str) -> BeautifulSoup:
-    r = requests.get(url, headers=HEADERS, timeout=30)
-    r.raise_for_status()
+    r = requests.get(url, headers=HEADERS, timeout=30); r.raise_for_status()
     return BeautifulSoup(r.text, "html.parser")
 
 def parse_time_range(text: str) -> Tuple[Optional[str], Optional[str]]:
@@ -142,8 +137,7 @@ DARKSPHERE_URL = "https://www.darksphere.co.uk/gamingcalendar.php"
 def scrape_darksphere(now: datetime) -> List[RBEvent]:
     soup = fetch(DARKSPHERE_URL); events: List[RBEvent] = []
     month_text_el = soup.find(string=re.compile(r"^(January|February|March|April|May|June|July|August|September|October|November|December)$", re.I))
-    month_name = month_text_el.strip() if month_text_el else now.strftime("%B")
-    year = now.year
+    month_name = month_text_el.strip() if month_text_el else now.strftime("%B"); year = now.year
     current_day: Optional[int] = None
     for node in soup.find_all(True):
         if node.name in ("div","p","span","h1","h2","h3","h4") and node.get_text(strip=True):
@@ -157,7 +151,6 @@ def scrape_darksphere(now: datetime) -> List[RBEvent]:
                 if hasattr(sib,'get_text'): time_text += " " + sib.get_text(" ", strip=True)
                 elif isinstance(sib,str): time_text += " " + sib.strip()
             start_str, end_str = parse_time_range(time_text)
-
             if current_day is None:
                 prev = node
                 for _ in range(10):
@@ -167,7 +160,6 @@ def scrape_darksphere(now: datetime) -> List[RBEvent]:
                     mday2 = re.match(r"^(\d{1,2})\.\s*[A-Za-z]+$", txt)
                     if mday2: current_day = int(mday2.group(1)); break
             if current_day is None: continue
-
             event_date = resolve_calendar_date(month_name, year, current_day)
             if not event_date: continue
             start_time = start_str or "19:00"
@@ -188,14 +180,12 @@ def _extract_date_from_title(title: str, default_year: int) -> Optional[date]:
     year = (2000 + int(y)) if y and len(y) == 2 else (int(y) if y else default_year)
     try: return date(year, mth, d)
     except ValueError: return None
-
 def _extract_date_loose(text: str, default_year: int) -> Optional[date]:
     try:
         dt = dtparse.parse(text, dayfirst=True, fuzzy=True, default=datetime(default_year,1,1))
         return date(dt.year, dt.month, dt.day)
     except Exception:
         return None
-
 def _scrape_shopify_products(hub_url: str, store_name: str, now: datetime) -> List[RBEvent]:
     soup = fetch(hub_url); events: List[RBEvent] = []
     for a in soup.select("a[href*='/products/']"):
@@ -275,7 +265,7 @@ def scrape_zombie(now: datetime) -> List[RBEvent]:
             events.append(RBEvent(title=title, start=start_dt, end=end_dt, url=url, store="Zombie Games Café (Cricklewood)", location="Zombie Games Café, London"))
     return list({(e.title, e.start): e for e in events}.values())
 
-# ---- Europa Gaming (standalone event pages)
+# ---- Europa Gaming (standalone pages)
 EUROPA_HOME = "https://www.europagaming.co.uk/"
 def _europa_collect_event_links(soup: BeautifulSoup) -> List[str]:
     links = []
@@ -284,6 +274,12 @@ def _europa_collect_event_links(soup: BeautifulSoup) -> List[str]:
         if "event-details-registration" in href and "riftbound" in (label + " " + href.lower()):
             links.append(requests.compat.urljoin(EUROPA_HOME, href))
     return list(dict.fromkeys(links))
+def _extract_date_loose(text: str, default_year: int) -> Optional[date]:
+    try:
+        dt = dtparse.parse(text, dayfirst=True, fuzzy=True, default=datetime(default_year,1,1))
+        return date(dt.year, dt.month, dt.day)
+    except Exception:
+        return None
 def scrape_europa(now: datetime) -> List[RBEvent]:
     events: List[RBEvent] = []
     try:
@@ -346,16 +342,12 @@ def export_ics(events: List[RBEvent], path: str):
         name = f"{ev.store}: {ev.title}"
         tag = _op_tag_for(ev.title)
         if tag: name = f"[{tag}] {name}"
-        ics_ev = IcsEvent()
-        ics_ev.name = name
-        ics_ev.begin = ev.start
+        ics_ev = IcsEvent(); ics_ev.name = name; ics_ev.begin = ev.start
         if ev.end: ics_ev.end = ev.end
-        ics_ev.url = ev.url
-        ics_ev.location = ev.location or ev.store
+        ics_ev.url = ev.url; ics_ev.location = ev.location or ev.store
         ics_ev.uid = ev.stable_id()
         cal.events.add(ics_ev)
-    with open(path, "w", encoding="utf-8") as f:
-        f.writelines(cal)
+    with open(path, "w", encoding="utf-8") as f: f.writelines(cal)
 def export_csv(events: List[RBEvent], path: str):
     import csv
     fields = ["date","start","end","store","title","url","location"]
@@ -401,8 +393,7 @@ def run_once(post: bool = True) -> List[RBEvent]:
         if post: post_discord(ev)
         seen.add(ev.uid()); seen.add(ev.stable_id())
 
-    save_state(seen)
-    return events
+    save_state(seen); return events
 
 def main():
     ap = argparse.ArgumentParser(description="Riftbound London Event Watcher")
