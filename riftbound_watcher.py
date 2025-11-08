@@ -106,6 +106,31 @@ def guess_end(start: datetime, hours: int = 3) -> datetime:
     return start + timedelta(hours=hours)
 
 
+def resolve_calendar_date(month_name: str, year: int, day: int) -> Optional[date]:
+    """
+    Dark Sphere sometimes shows a day that actually belongs to the *next* month
+    (e.g., '31' while the page header still says 'November').
+    We first try the stated month; if invalid, we try the next month.
+    """
+    try:
+        month = dtparse.parse(month_name).month
+    except Exception:
+        month = 1
+    # try current month
+    last = calendar.monthrange(year, month)[1]
+    if 1 <= day <= last:
+        return date(year, month, day)
+    # try next month
+    if month == 12:
+        n_year, n_month = year + 1, 1
+    else:
+        n_year, n_month = year, month + 1
+    last_next = calendar.monthrange(n_year, n_month)[1]
+    if 1 <= day <= last_next:
+        return date(n_year, n_month, day)
+    return None
+
+
 # ---------------------------- Discord Notify ------------------------------
 
 def post_discord(event: RBEvent) -> None:
@@ -206,11 +231,14 @@ def scrape_darksphere(now: datetime) -> List[RBEvent]:
                 # Can't determine date — skip
                 continue
 
-            # Build datetime
-            day_str = f"{current_day} {month_name} {year}"
+            # Build datetime (robust across month boundaries)
+            event_date = resolve_calendar_date(month_name, year, current_day)
+            if not event_date:
+                # Can't resolve a valid date; skip
+                continue
             start_time = start_str or "19:00"  # default evening
-            start_dt = londonify(dtparse.parse(f"{day_str} {start_time}", dayfirst=True))
-            end_dt = londonify(dtparse.parse(f"{day_str} {end_str}", dayfirst=True)) if end_str else guess_end(start_dt, 4)
+            start_dt = londonify(dtparse.parse(f"{event_date.isoformat()} {start_time}", dayfirst=False))
+            end_dt = londonify(dtparse.parse(f"{event_date.isoformat()} {end_str}", dayfirst=False)) if end_str else guess_end(start_dt, 4)
 
             ev = RBEvent(
                 title=title,
