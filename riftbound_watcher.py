@@ -67,7 +67,13 @@ class RBEvent:
     location: Optional[str] = None
 
     def uid(self) -> str:
+        # Historical (title-sensitive) ID
         base = f"{self.store}|{self.title}|{self.start.isoformat()}"
+        return hashlib.sha1(base.encode("utf-8")).hexdigest()
+
+    def stable_id(self) -> str:
+        # Title-agnostic ID: store + minute-precision start time
+        base = f"{self.store}|{self.start.replace(second=0, microsecond=0).isoformat()}"
         return hashlib.sha1(base.encode("utf-8")).hexdigest()
 
     def to_dict(self):
@@ -87,8 +93,9 @@ def load_state() -> set:
     if not os.path.exists(STATE_PATH):
         return set()
     with open(STATE_PATH, "r", encoding="utf-8") as f:
-        seen = set(json.load(f))
-    return seen
+        raw = json.load(f)
+    # Back-compat: state used to be only title-based uids. Keep whatever’s there.
+    return set(raw if isinstance(raw, list) else [])
 
 
 def save_state(seen: set):
@@ -251,9 +258,7 @@ def scrape_darksphere(now: datetime) -> List[RBEvent]:
             )
             events.append(ev)
 
-    # Deduplicate by UID
-    uniq = {e.uid(): e for e in events}
-    return list(uniq.values())
+    return events  # (dedup happens later)
 
 
 # ---- Spellbound Games (Shopify collection of events)
@@ -323,9 +328,45 @@ def scrape_spellbound(now: datetime) -> List[RBEvent]:
             location="Spellbound Games, London"
         ))
 
-    # Dedup by UID
-    uniq = {e.uid(): e for e in events}
-    return list(uniq.values())
+    return events  # (dedup happens later)
+
+
+# ----------------------- De-dup helpers -----------------------------------
+
+def _canonical_title(title: str) -> str:
+    t = title.lower()
+    t = re.sub(r"[-–:]+", " ", t)
+    t = t.replace("nexus nights", "nexus night")
+    t = re.sub(r"\s+", " ", t).strip()
+    return t
+
+def _prefer_event(a: RBEvent, b: RBEvent) -> RBEvent:
+    # Prefer specific event pages; then prefer more descriptive titles
+    def score(ev: RBEvent) -> tuple:
+        url_score = 1 if "event.php" in (ev.url or "") else 0
+        title_score = len(ev.title or "")
+        return (url_score, title_score)
+    return a if score(a) >= score(b) else b
+
+def _dedup_slot_conflicts(events: List[RBEvent]) -> List[RBEvent]:
+    """
+    Collapse duplicates where store + start(minute) are identical.
+    If both look like Riftbound, keep the better one (see _prefer_event).
+    """
+    by_key: dict = {}
+    for ev in events:
+        key = (ev.store, ev.start.replace(second=0, microsecond=0))
+        if key not in by_key:
+            by_key[key] = ev
+        else:
+            if "riftbound" in _canonical_title(ev.title) and "riftbound" in _canonical_title(by_key[key].title):
+                by_key[key] = _prefer_event(by_key[key], ev)
+            else:
+                # allow parallel non-Riftbound entries at same slot by splitting key
+                alt_key = (ev.store, ev.start.replace(second=0, microsecond=0), _canonical_title(ev.title))
+                cur = by_key.get(alt_key)
+                by_key[alt_key] = _prefer_event(cur, ev) if cur else ev
+    return list(by_key.values())
 
 
 # ----------------------- Export helpers (ICS/CSV) --------------------------
@@ -340,7 +381,7 @@ def export_ics(events: List[RBEvent], path: str):
             ics_ev.end = ev.end
         ics_ev.url = ev.url
         ics_ev.location = ev.location or ev.store
-        ics_ev.uid = ev.uid()
+        ics_ev.uid = ev.stable_id()  # use stable ID in calendar
         cal.events.add(ics_ev)
     with open(path, "w", encoding="utf-8") as f:
         f.writelines(cal)
@@ -368,7 +409,7 @@ def export_csv(events: List[RBEvent], path: str):
 
 def find_events(now: Optional[datetime] = None) -> List[RBEvent]:
     now = londonify(now or datetime.now(tz=LONDON_TZ))
-    evs = []
+    evs: List[RBEvent] = []
     try:
         evs.extend(scrape_darksphere(now))
     except Exception as e:
@@ -378,10 +419,11 @@ def find_events(now: Optional[datetime] = None) -> List[RBEvent]:
     except Exception as e:
         print(f"[warn] Spellbound scrape failed: {e}")
 
-    # future-only, unique by UID
+    # Future-only
     evs = [e for e in evs if e.start >= (now - timedelta(days=1))]
-    uniq = {e.uid(): e for e in evs}
-    return list(uniq.values())
+    # De-duplicate across title variations at same store+time
+    evs = _dedup_slot_conflicts(evs)
+    return evs
 
 
 def run_once(post: bool = True) -> List[RBEvent]:
@@ -389,14 +431,21 @@ def run_once(post: bool = True) -> List[RBEvent]:
     now = londonify(datetime.now(tz=LONDON_TZ))
     events = find_events(now)
 
-    new_events = [e for e in events if e.uid() not in seen]
+    new_events: List[RBEvent] = []
+    for e in events:
+        # Treat either historical (title-based) uid OR stable-id as "seen"
+        if e.uid() in seen or e.stable_id() in seen:
+            continue
+        new_events.append(e)
 
     # Notify
     for ev in sorted(new_events, key=lambda e: e.start):
         print(f"NEW: {ev.start:%Y-%m-%d %H:%M} — {ev.store} — {ev.title}\n{ev.url}\n")
         if post:
             post_discord(ev)
+        # Save both IDs so title changes won't cause re-post
         seen.add(ev.uid())
+        seen.add(ev.stable_id())
 
     save_state(seen)
     return events
