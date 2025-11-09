@@ -1,47 +1,66 @@
-name: Riftbound Watcher
+name: Riftbound Watcher (Connectivity Test)
 
 on:
+  workflow_dispatch: {}
   schedule:
     - cron: "0 */2 * * *"
-  workflow_dispatch: {}
 
 jobs:
   run:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Install deps
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          # If you have a requirements.txt, install it; otherwise remove this line
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
 
-      - name: Run watcher
+      # Add a simple connectivity test so you can see if the GitHub runner can reach each store
+      - name: Connectivity test
+        run: |
+          set +e
+          urls=(
+            "https://www.darksphere.co.uk/gamingcalendar.php"
+            "https://spellboundgames.co.uk/collections/events"
+            "https://thebrotherhoodgames.co.uk/product-category/events/"
+            "https://leisuregames.com/collections/tickets"
+            "https://www.zombiegamescafe.com/tcg-events-tickets"
+            "https://www.europagaming.co.uk/"
+          )
+          for url in "${urls[@]}"; do
+            echo "Testing $url"
+            # -L follow redirects; -s silent; -S to show errors; -I for headers; --max-time 30 to timeout after 30s
+            curl -L -s -S -I --max-time 30 "$url" || echo "Could not connect to $url"
+            echo ""
+          done
+
+      - name: Run Riftbound watcher
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: |
-          python riftbound_watcher.py run
-
-      - name: Commit state if changed
-        run: |
-          set -e
-          if [[ -n "$(git status --porcelain .data/state.json || true)" ]]; then
-            git config user.name "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git fetch origin main
-            git pull --rebase origin main || true
-            git add .data/state.json
-            git commit -m "Update state.json [skip ci]" || exit 0
-            git push origin HEAD:main
+          # Only run the watcher if the script is present
+          if [ -f riftbound_watcher.py ]; then
+            python riftbound_watcher.py run
+          else
+            echo "riftbound_watcher.py not found in this repository"
           fi
 
+      # Persist state.json changes back to the repository
+      - name: Commit state if changed
+        run: |
+          set +e
+          if [ -f .data/state.json ] && [[ -n "$(git status --porcelain .data/state.json)" ]]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add .data/state.json
+            git commit -m "Update state.json [skip ci]" || true
+            git push origin HEAD:main
+          fi
